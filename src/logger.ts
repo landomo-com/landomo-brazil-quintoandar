@@ -15,7 +15,7 @@ export function createLogger(module: string): Logger {
 
   return {
     info: (message: string, ...args: any[]) => {
-      console.log(`${prefix} ${message}`, ...args);
+      console.error(`${prefix} ${message}`, ...args);
     },
     warn: (message: string, ...args: any[]) => {
       console.warn(`${prefix} ${message}`, ...args);

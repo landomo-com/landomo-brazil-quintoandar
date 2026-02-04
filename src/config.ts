@@ -20,7 +20,7 @@ export const config = {
 
   // Scraper Behavior
   debug: process.env.DEBUG === 'true',
-  requestDelayMs: parseInt(process.env.REQUEST_DELAY_MS || '1000'),
+  requestDelayMs: parseInt(process.env.REQUEST_DELAY_MS || '5000'), // Increased from 1000 to 5000ms
   maxConcurrentRequests: parseInt(process.env.MAX_CONCURRENT_REQUESTS || '5'),
   pageSize: parseInt(process.env.PAGE_SIZE || '100'),
   businessContext: (process.env.BUSINESS_CONTEXT || 'RENT') as 'RENT' | 'SALE',

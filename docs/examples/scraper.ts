@@ -4,12 +4,12 @@
  * Primarily a rental platform but also has sales
  */
 
-import axios, { AxiosInstance } from 'axios';
 import { config, CITY_COORDS } from './config';
 import { transformToStandard } from './transformer';
 import { sendToCoreService } from './core';
 import { logger } from './logger';
 import { randomDelay } from './utils';
+import { TLSClient } from './tls-client';
 import {
   QuintoAndarListing,
   APIResponse,
@@ -19,19 +19,17 @@ import {
 } from './types';
 
 export class QuintoAndarScraper {
-  private client: AxiosInstance;
+  private client: TLSClient;
+  private hasLoggedSample: boolean = false;
+  private hasLoggedParams: boolean = false;
 
   constructor() {
-    this.client = axios.create({
-      baseURL: config.baseApiUrl,
-      timeout: 30000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        Accept: 'application/json',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-        'Content-Type': 'application/json',
-      },
-    });
+    this.client = new TLSClient();
+  }
+
+  async initialize() {
+    await this.client.initialize();
+    logger.info('QuintoAndar scraper initialized with TLS fingerprinting');
   }
 
   /**
@@ -100,30 +98,8 @@ export class QuintoAndarScraper {
       params['filters.location.viewport.west'] = String(viewport.west);
     }
 
-    // Add field selections
-    const fields = [
-      'id',
-      'rent',
-      'totalCost',
-      'iptuPlusCondominium',
-      'area',
-      'bedrooms',
-      'bathrooms',
-      'parkingSpaces',
-      'address',
-      'regionName',
-      'city',
-      'neighbourhood',
-      'coverImage',
-      'forSale',
-      'salePrice',
-      'type',
-      'visitStatus',
-    ];
-
-    fields.forEach((field, i) => {
-      params[`fields[${i}]`] = field;
-    });
+    // Don't add field selections - let API return all fields by default
+    // (Adding fields selection seems to cause API to return minimal data)
 
     return params;
   }
@@ -140,10 +116,18 @@ export class QuintoAndarScraper {
   ): Promise<APIResponse> {
     const params = this.buildListingsParams(city, state, businessContext, offset, pageSize);
 
-    try {
-      const response = await this.client.get<APIResponse>(config.coordinatesEndpoint, {
-        params,
+    if (config.debug && offset === 0 && !this.hasLoggedParams) {
+      logger.info('API Request params sample:', {
+        endpoint: config.coordinatesEndpoint,
+        paramCount: Object.keys(params).length,
+        fields: Object.keys(params).filter(k => k.startsWith('fields[')).length
       });
+      this.hasLoggedParams = true;
+    }
+
+    try {
+      const fullUrl = `${config.baseApiUrl}${config.coordinatesEndpoint}`;
+      const response = await this.client.get(fullUrl, params);
 
       return response.data;
     } catch (error) {
@@ -164,6 +148,12 @@ export class QuintoAndarScraper {
   private parseListing(hit: QuintoAndarListing, businessContext: 'RENT' | 'SALE'): any {
     const source = hit._source;
     const listingId = hit._id;
+
+    // Debug: Log first listing to see actual API structure
+    if (config.debug && !this.hasLoggedSample) {
+      logger.info('Sample API response structure:', { source, hit });
+      this.hasLoggedSample = true;
+    }
 
     // Determine transaction type and price
     const isSale = source.forSale || businessContext === 'SALE';
@@ -236,6 +226,7 @@ export class QuintoAndarScraper {
       failed: 0,
       city,
       state,
+      properties: [],
     };
 
     try {
@@ -248,20 +239,50 @@ export class QuintoAndarScraper {
       // Process all pages
       let offset = 0;
       while (offset < result.total) {
-        const response = await this.fetchListings(
-          city,
-          state,
-          config.businessContext,
-          offset,
-          config.pageSize
-        );
+        let response;
+        let retries = 0;
+        const maxRetries = 3;
+
+        while (retries <= maxRetries) {
+          try {
+            response = await this.fetchListings(
+              city,
+              state,
+              config.businessContext,
+              offset,
+              config.pageSize
+            );
+            break; // Success, exit retry loop
+          } catch (error) {
+            retries++;
+            if (retries > maxRetries) {
+              logger.warn(`Stopping pagination at offset ${offset} after ${maxRetries} retries`, {
+                city,
+                state,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              break; // Stop pagination but keep what we got
+            }
+
+            // Exponential backoff: 5s, 10s, 20s
+            const backoffDelay = config.requestDelayMs * Math.pow(2, retries - 1);
+            logger.info(`Retry ${retries}/${maxRetries} after ${backoffDelay}ms delay`, { city, state, offset });
+            await randomDelay(backoffDelay, backoffDelay * 1.5);
+          }
+        }
+
+        if (!response) break; // No response after retries, stop pagination
 
         for (const hit of response.hits.hits) {
           try {
             const parsed = this.parseListing(hit, config.businessContext);
             const standardized = transformToStandard(parsed);
 
-            // Send to Core Service
+            // Always count as scraped
+            result.scraped++;
+            result.properties.push(standardized);
+
+            // Send to Core Service if configured
             if (config.apiKey) {
               await sendToCoreService({
                 portal: config.portal,
@@ -271,8 +292,6 @@ export class QuintoAndarScraper {
                 raw_data: parsed.rawData,
               });
             }
-
-            result.scraped++;
 
             if (config.debug && result.scraped <= 3) {
               logger.debug('Sample listing', { parsed, standardized });
@@ -289,9 +308,17 @@ export class QuintoAndarScraper {
         offset += config.pageSize;
         logger.info(`Progress: ${offset}/${result.total} listings processed`);
 
-        // Rate limiting
+        // Rotate TLS fingerprint every 5 pages (500 listings)
+        if (offset % (config.pageSize * 5) === 0) {
+          await this.client.rotateProfile();
+          logger.info('Rotated TLS fingerprint');
+        }
+
+        // Rate limiting with random delays (3-8 seconds instead of fixed 5s)
         if (offset < result.total) {
-          await randomDelay(config.requestDelayMs, config.requestDelayMs * 2);
+          const minDelay = config.requestDelayMs * 0.6; // 3s
+          const maxDelay = config.requestDelayMs * 1.6; // 8s
+          await randomDelay(minDelay, maxDelay);
         }
       }
 
@@ -307,51 +334,68 @@ export class QuintoAndarScraper {
   }
 
   /**
-   * Scrape multiple cities
+   * Cleanup TLS client
+   */
+  async cleanup() {
+    await this.client.destroy();
+    logger.info('TLS client destroyed');
+  }
+
+  /**
+   * Scrape multiple cities IN PARALLEL
    */
   async scrapeAll(cities: { city: string; state: string }[]): Promise<ScraperResult[]> {
-    const results: ScraperResult[] = [];
+    logger.info(`Starting parallel scrape for ${cities.length} cities`);
 
-    for (const { city, state } of cities) {
+    // Launch all city scrapers in parallel
+    const promises = cities.map(async ({ city, state }) => {
       try {
         const result = await this.scrapeCity(city, state);
-        results.push(result);
-
-        // Delay between cities
-        await randomDelay(config.requestDelayMs * 2, config.requestDelayMs * 4);
+        return result;
       } catch (error) {
         logger.error(`Failed to scrape city`, {
           city,
           state,
           error: error instanceof Error ? error.message : String(error),
         });
-        results.push({
+        return {
           total: 0,
           scraped: 0,
           failed: 0,
           city,
           state,
-        });
+          properties: [],
+        };
       }
-    }
+    });
 
+    // Wait for all cities to complete
+    const results = await Promise.all(promises);
+
+    logger.info(`Completed parallel scrape for ${cities.length} cities`);
     return results;
   }
 }
 
 // Main execution
 async function main() {
-  logger.info('Starting QuintoAndar scraper');
+  logger.info('Starting QuintoAndar scraper with TLS fingerprinting');
 
   const scraper = new QuintoAndarScraper();
+  await scraper.initialize();
 
-  // Default cities to scrape
+  // ALL Brazilian cities with coordinates
   const cities = [
     { city: 'São Paulo', state: 'SP' },
     { city: 'Rio de Janeiro', state: 'RJ' },
     { city: 'Belo Horizonte', state: 'MG' },
     { city: 'Curitiba', state: 'PR' },
     { city: 'Porto Alegre', state: 'RS' },
+    { city: 'Brasília', state: 'DF' },
+    { city: 'Salvador', state: 'BA' },
+    { city: 'Fortaleza', state: 'CE' },
+    { city: 'Recife', state: 'PE' },
+    { city: 'Campinas', state: 'SP' },
   ];
 
   try {
@@ -364,7 +408,14 @@ async function main() {
       cities: results.length,
     };
 
+    // Output JSON for test framework
+    const allProperties = results.flatMap(r => r.properties);
+    console.log(JSON.stringify(allProperties));
+
     logger.info('Scraping completed', summary);
+
+    // Cleanup
+    await scraper.cleanup();
   } catch (error) {
     logger.error('Scraping failed', {
       error: error instanceof Error ? error.message : String(error),

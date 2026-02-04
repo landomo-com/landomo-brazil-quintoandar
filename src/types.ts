@@ -106,4 +106,5 @@ export interface ScraperResult {
   failed: number;
   city: string;
   state: string;
+  properties: any[];
 }
