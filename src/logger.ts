@@ -30,3 +30,6 @@ export function createLogger(module: string): Logger {
     }
   };
 }
+
+// Default logger instance
+export const logger = createLogger('quintoandar');
