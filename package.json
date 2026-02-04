@@ -12,6 +12,7 @@
     "coordinator:geo": "tsx src/coordinator.ts geo",
     "worker": "tsx src/worker.ts",
     "worker:verifier": "tsx src/worker-verifier.ts",
+    "metrics": "tsx src/metrics-server.ts",
     "queue:stats": "tsx src/queue-stats.ts stats",
     "queue:clear": "tsx src/queue-stats.ts clear",
     "queue:retry-failed": "tsx src/queue-stats.ts retry-failed",
@@ -28,12 +29,15 @@
   },
   "dependencies": {
     "@types/ioredis": "^4.28.10",
+    "@types/pg": "^8.10.0",
     "axios": "^1.6.0",
     "dotenv": "^16.0.0",
     "ioredis": "^5.9.2",
     "node-tls-client": "^2.1.0",
+    "pg": "^8.11.0",
     "playwright": "^1.58.1",
     "playwright-extra": "^4.3.6",
+    "prom-client": "^15.1.0",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "winston": "^3.11.0"
   },
