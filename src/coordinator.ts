@@ -220,6 +220,30 @@ export class QuintoAndarCoordinator {
       totalDiscovered: finalStats.totalDiscovered,
       newIdsQueued: totalAdded,
     });
+
+    // Find and queue missing properties (not seen in last 12 hours)
+    await this.identifyMissingProperties();
+  }
+
+  /**
+   * Identify properties not seen recently and queue for verification
+   */
+  async identifyMissingProperties(hoursThreshold: number = 12): Promise<void> {
+    logger.info(`\n=== IDENTIFYING MISSING PROPERTIES (>${hoursThreshold}h) ===`);
+
+    const missingIds = await this.queue.findMissingProperties(hoursThreshold);
+
+    if (missingIds.length === 0) {
+      logger.info('No missing properties found');
+      return;
+    }
+
+    logger.info(`Found ${missingIds.length} properties not seen in last ${hoursThreshold} hours`);
+
+    // Push to missing verification queue
+    const queued = await this.queue.pushToMissingQueue(missingIds);
+
+    logger.info(`Queued ${queued} properties for verification (${missingIds.length - queued} already verified inactive)`);
   }
 
   /**

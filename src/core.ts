@@ -47,8 +47,11 @@ export interface IngestionPayload {
   portal: string;
   portal_id: string;
   country: string;
-  data: StandardProperty;
+  data: StandardProperty | null;  // null for status-only updates
   raw_data?: any;
+  status?: 'active' | 'inactive';
+  inactive_reason?: string;
+  last_seen?: number;
 }
 
 /**
@@ -76,4 +79,24 @@ export async function sendToCoreService(payload: IngestionPayload): Promise<void
     console.error('Failed to send to Core Service:', error);
     throw error;
   }
+}
+
+/**
+ * Mark property as inactive in Core Service
+ */
+export async function markPropertyInactive(
+  portal: string,
+  portalId: string,
+  country: string,
+  reason: string = 'not_found'
+): Promise<void> {
+  await sendToCoreService({
+    portal,
+    portal_id: portalId,
+    country,
+    data: null,
+    status: 'inactive',
+    inactive_reason: reason,
+    last_seen: Date.now(),
+  });
 }

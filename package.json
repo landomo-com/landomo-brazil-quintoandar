@@ -11,6 +11,7 @@
     "coordinator": "tsx src/coordinator.ts city",
     "coordinator:geo": "tsx src/coordinator.ts geo",
     "worker": "tsx src/worker.ts",
+    "worker:verifier": "tsx src/worker-verifier.ts",
     "queue:stats": "tsx src/queue-stats.ts stats",
     "queue:clear": "tsx src/queue-stats.ts clear",
     "queue:retry-failed": "tsx src/queue-stats.ts retry-failed",

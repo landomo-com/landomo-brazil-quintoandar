@@ -100,9 +100,11 @@ export class RedisQueue {
 
   /**
    * Push multiple listing IDs to queue
+   * Also updates last_seen timestamp for all IDs (for change detection)
    */
   async pushListingIds(ids: string[]): Promise<number> {
     let addedCount = 0;
+    const timestamp = Date.now();
 
     // Process in batches of 1000 for efficiency
     const batchSize = 1000;
@@ -112,12 +114,15 @@ export class RedisQueue {
 
       for (const id of batch) {
         pipeline.sadd(this.allIdsKey, id);
+        // Update last_seen timestamp for all discovered IDs (new and existing)
+        pipeline.set(`${this.namespace}:last_seen:${id}`, timestamp);
       }
 
       const results = await pipeline.exec();
 
       // Count how many were new (sadd returns 1 for new, 0 for existing)
-      const newIds = batch.filter((id, idx) => results![idx][1] === 1);
+      // Every other result is last_seen set (which we don't count)
+      const newIds = batch.filter((id, idx) => results![idx * 2][1] === 1);
 
       if (newIds.length > 0) {
         await this.redis.lpush(this.queueKey, ...newIds);
@@ -289,5 +294,113 @@ export class RedisQueue {
    */
   isConnected(): boolean {
     return this.redis.status === 'ready';
+  }
+
+  // ===== CHANGE DETECTION & MISSING PROPERTY TRACKING =====
+
+  /**
+   * Update last seen timestamp for a property
+   */
+  async updateLastSeen(id: string): Promise<void> {
+    const timestamp = Date.now();
+    await this.redis.set(`${this.namespace}:last_seen:${id}`, timestamp);
+  }
+
+  /**
+   * Get last seen timestamp for a property
+   */
+  async getLastSeen(id: string): Promise<number | null> {
+    const timestamp = await this.redis.get(`${this.namespace}:last_seen:${id}`);
+    return timestamp ? parseInt(timestamp, 10) : null;
+  }
+
+  /**
+   * Find properties not seen in the last N hours
+   * Returns array of property IDs that may be inactive/removed
+   */
+  async findMissingProperties(hoursThreshold: number = 12): Promise<string[]> {
+    const allIds = await this.redis.smembers(this.allIdsKey);
+    const missingIds: string[] = [];
+    const cutoffTime = Date.now() - (hoursThreshold * 60 * 60 * 1000);
+
+    // Check each property's last_seen timestamp
+    for (const id of allIds) {
+      const lastSeen = await this.getLastSeen(id);
+
+      if (!lastSeen || lastSeen < cutoffTime) {
+        // Property not seen recently
+        missingIds.push(id);
+      }
+    }
+
+    return missingIds;
+  }
+
+  /**
+   * Push property IDs to missing verification queue
+   */
+  async pushToMissingQueue(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+
+    const missingQueueKey = `${this.namespace}:missing_queue`;
+    const verifiedInactiveKey = `${this.namespace}:verified_inactive`;
+
+    let newCount = 0;
+
+    for (const id of ids) {
+      // Skip if already verified as inactive
+      const isVerifiedInactive = await this.redis.sismember(verifiedInactiveKey, id);
+      if (isVerifiedInactive) continue;
+
+      // Add to missing queue
+      await this.redis.lpush(missingQueueKey, id);
+      newCount++;
+    }
+
+    return newCount;
+  }
+
+  /**
+   * Pop property ID from missing verification queue
+   */
+  async popFromMissingQueue(timeoutSeconds: number = 5): Promise<string | null> {
+    const missingQueueKey = `${this.namespace}:missing_queue`;
+    const result = await this.redis.brpop(missingQueueKey, timeoutSeconds);
+    return result ? result[1] : null;
+  }
+
+  /**
+   * Mark property as verified inactive (removed from portal)
+   */
+  async markVerifiedInactive(id: string): Promise<void> {
+    const verifiedInactiveKey = `${this.namespace}:verified_inactive`;
+    await this.redis.sadd(verifiedInactiveKey, id);
+
+    // Remove from processed to allow re-verification if it comes back
+    await this.redis.srem(this.processedIdsKey, id);
+  }
+
+  /**
+   * Check if property is verified inactive
+   */
+  async isVerifiedInactive(id: string): Promise<boolean> {
+    const verifiedInactiveKey = `${this.namespace}:verified_inactive`;
+    return (await this.redis.sismember(verifiedInactiveKey, id)) === 1;
+  }
+
+  /**
+   * Get count of verified inactive properties
+   */
+  async getVerifiedInactiveCount(): Promise<number> {
+    const verifiedInactiveKey = `${this.namespace}:verified_inactive`;
+    return await this.redis.scard(verifiedInactiveKey);
+  }
+
+  /**
+   * Get missing queue depth
+   */
+  async getMissingQueueDepth(): Promise<number> {
+    const missingQueueKey = `${this.namespace}:missing_queue`;
+    return await this.redis.llen(missingQueueKey);
   }
 }

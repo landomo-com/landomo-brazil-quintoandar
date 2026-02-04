@@ -18,7 +18,7 @@
 import axios from 'axios';
 import { config } from './config';
 import { transformToStandard } from './transformer';
-import { sendToCoreService } from './core';
+import { sendToCoreService, markPropertyInactive } from './core';
 import { logger } from './logger';
 import { randomDelay } from './utils';
 import { RedisQueue } from './redis-queue';
