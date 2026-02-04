@@ -29,6 +29,8 @@ export class QuintoAndarWorker {
   private isRunning: boolean = false;
   private processedCount: number = 0;
   private failedCount: number = 0;
+  private changedCount: number = 0;
+  private unchangedCount: number = 0;
 
   constructor(workerId?: string) {
     this.workerId = workerId || `worker-${process.pid}`;
@@ -108,26 +110,46 @@ export class QuintoAndarWorker {
         return false;
       }
 
-      // Transform to StandardProperty
-      const standardized = transformToStandard(property);
+      // Check if property has changed (compare with snapshot)
+      const hasChanged = await this.queue.hasPropertyChanged(id, property.rawData);
 
-      // Send to Core Service
-      if (config.apiKey) {
-        await sendToCoreService({
-          portal: config.portal,
-          portal_id: property.id,
-          country: config.country,
-          data: standardized,
-          raw_data: property.rawData,
-        });
+      if (!hasChanged) {
+        // Property unchanged - skip sending to Core Service
+        logger.debug(`[${this.workerId}] Property ${id} unchanged - skipping Core Service`);
+        this.unchangedCount++;
+      } else {
+        // Property changed or new - send to Core Service
+        logger.info(`[${this.workerId}] Property ${id} changed - sending to Core Service`);
+
+        // Transform to StandardProperty
+        const standardized = transformToStandard(property);
+
+        // Send to Core Service
+        if (config.apiKey) {
+          await sendToCoreService({
+            portal: config.portal,
+            portal_id: property.id,
+            country: config.country,
+            data: standardized,
+            raw_data: property.rawData,
+            status: 'active'
+          });
+        }
+
+        // Update snapshot after successful send
+        await this.queue.storePropertySnapshot(id, property.rawData);
+        this.changedCount++;
       }
 
-      // Mark as processed
+      // Mark as processed (whether changed or not)
       await this.queue.markProcessed(id);
       this.processedCount++;
 
       if (this.processedCount % 10 === 0) {
-        logger.info(`[${this.workerId}] Processed: ${this.processedCount}, Failed: ${this.failedCount}`);
+        logger.info(
+          `[${this.workerId}] Processed: ${this.processedCount} ` +
+          `(Changed: ${this.changedCount}, Unchanged: ${this.unchangedCount}, Failed: ${this.failedCount})`
+        );
       }
 
       return true;
@@ -194,7 +216,10 @@ export class QuintoAndarWorker {
       }
     }
 
-    logger.info(`[${this.workerId}] Worker stopped. Processed: ${this.processedCount}, Failed: ${this.failedCount}`);
+    logger.info(
+      `[${this.workerId}] Worker stopped. ` +
+      `Processed: ${this.processedCount} (Changed: ${this.changedCount}, Unchanged: ${this.unchangedCount}, Failed: ${this.failedCount})`
+    );
   }
 
   /**
@@ -213,7 +238,12 @@ export class QuintoAndarWorker {
     return {
       workerId: this.workerId,
       processedCount: this.processedCount,
+      changedCount: this.changedCount,
+      unchangedCount: this.unchangedCount,
       failedCount: this.failedCount,
+      changeRate: this.processedCount > 0
+        ? ((this.changedCount / this.processedCount) * 100).toFixed(2) + '%'
+        : '0%',
       isRunning: this.isRunning,
     };
   }

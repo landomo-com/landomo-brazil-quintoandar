@@ -403,4 +403,127 @@ export class RedisQueue {
     const missingQueueKey = `${this.namespace}:missing_queue`;
     return await this.redis.llen(missingQueueKey);
   }
+
+  // ===== CHANGE DETECTION & SNAPSHOTS =====
+
+  /**
+   * Calculate checksum of important property fields
+   * Creates single hash from price + description + status + images + amenities
+   */
+  private calculatePropertyChecksum(property: any): string {
+    // Gather all important fields
+    const importantData = {
+      price: property.rent || property.salePrice || property.price || 0,
+      description: property.description || '',
+      status: property.visitStatus || property.status || 'unknown',
+      images: (property.imageList || property.images || []).join('|'),
+      amenities: (property.amenities || []).sort().join('|'),
+      features: (property.installations || []).sort().join('|'),
+      bedrooms: property.bedrooms || 0,
+      bathrooms: property.bathrooms || 0,
+      area: property.area || 0,
+      address: property.address || '',
+      city: property.city || ''
+    };
+
+    // Create concatenated string of all important data
+    const dataString = JSON.stringify(importantData);
+
+    // Calculate checksum
+    return this.hashString(dataString);
+  }
+
+  /**
+   * Store property snapshot for change detection
+   * Uses comprehensive checksum of all important fields
+   */
+  async storePropertySnapshot(id: string, property: any): Promise<void> {
+    const snapshotKey = `${this.namespace}:snapshot:${id}`;
+
+    // Calculate comprehensive checksum
+    const checksum = this.calculatePropertyChecksum(property);
+
+    // Create snapshot with individual fields AND checksum
+    const snapshot = {
+      checksum: checksum,
+      price: property.rent || property.salePrice || property.price || 0,
+      status: property.visitStatus || property.status || 'unknown',
+      updated_at: Date.now()
+    };
+
+    await this.redis.hset(snapshotKey, snapshot as any);
+  }
+
+  /**
+   * Get property snapshot
+   */
+  async getPropertySnapshot(id: string): Promise<any | null> {
+    const snapshotKey = `${this.namespace}:snapshot:${id}`;
+    const snapshot = await this.redis.hgetall(snapshotKey);
+
+    if (!snapshot || Object.keys(snapshot).length === 0) {
+      return null;
+    }
+
+    return {
+      checksum: snapshot.checksum,
+      price: parseFloat(snapshot.price || '0'),
+      status: snapshot.status,
+      updated_at: parseInt(snapshot.updated_at || '0', 10)
+    };
+  }
+
+  /**
+   * Detect changes between current property and snapshot
+   * Uses comprehensive checksum comparison for efficiency
+   * Returns true if property has changed
+   */
+  async hasPropertyChanged(id: string, currentProperty: any): Promise<boolean> {
+    const snapshot = await this.getPropertySnapshot(id);
+
+    // If no snapshot, it's a new property (considered changed)
+    if (!snapshot) {
+      return true;
+    }
+
+    // Calculate current property checksum
+    const currentChecksum = this.calculatePropertyChecksum(currentProperty);
+
+    // Compare checksums - single comparison for all fields!
+    if (snapshot.checksum !== currentChecksum) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Simple string hash function for change detection
+   */
+  private hashString(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return hash.toString();
+  }
+
+  /**
+   * Get change statistics
+   */
+  async getChangeStats(): Promise<{
+    totalSnapshots: number;
+    snapshotsWithChanges: number;
+  }> {
+    // Count snapshots
+    const pattern = `${this.namespace}:snapshot:*`;
+    const keys = await this.redis.keys(pattern);
+
+    return {
+      totalSnapshots: keys.length,
+      snapshotsWithChanges: 0 // Would need to track separately
+    };
+  }
 }
